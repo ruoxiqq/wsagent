@@ -1,0 +1,3 @@
+# 防御智能体依赖
+# Python 3 标准库即可运行，无需额外安装包
+# 系统命令依赖: ss, ps, kill, iptables (CentOS 7 默认已安装)

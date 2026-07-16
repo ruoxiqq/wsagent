@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文件上传系统 - 演示靶场</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            background: #fff;
+            border-radius: 16px;
+            padding: 48px 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            width: 520px;
+            max-width: 90vw;
+        }
+        h1 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 8px;
+            text-align: center;
+        }
+        .subtitle {
+            color: #999;
+            font-size: 14px;
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        .upload-area {
+            border: 2px dashed #ccc;
+            border-radius: 12px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 24px;
+        }
+        .upload-area:hover {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+        .upload-area .icon {
+            font-size: 48px;
+            color: #ccc;
+            margin-bottom: 12px;
+        }
+        .upload-area p {
+            color: #666;
+            font-size: 14px;
+        }
+        .upload-area .filename {
+            color: #667eea;
+            font-weight: bold;
+            margin-top: 8px;
+        }
+        #fileInput { display: none; }
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: opacity 0.3s;
+        }
+        .btn:hover { opacity: 0.9; }
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 16px;
+            border-radius: 8px;
+            display: none;
+            font-size: 14px;
+            word-break: break-all;
+        }
+        .result.success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border: 1px solid #a5d6a7;
+            display: block;
+        }
+        .result.error {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ef9a9a;
+            display: block;
+        }
+        .file-list {
+            margin-top: 24px;
+        }
+        .file-list h3 {
+            font-size: 14px;
+            color: #999;
+            margin-bottom: 12px;
+        }
+        .file-list ul {
+            list-style: none;
+        }
+        .file-list li {
+            padding: 8px 12px;
+            background: #f5f5f5;
+            border-radius: 6px;
+            margin-bottom: 6px;
+            font-size: 13px;
+            color: #666;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .file-list li a {
+            color: #667eea;
+            text-decoration: none;
+            font-size: 12px;
+        }
+        .file-list li a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>文件上传系统</h1>
+        <p class="subtitle">演示靶场 - 仅供安全教学使用</p>
+
+        <form id="uploadForm" action="upload.php" method="POST" enctype="multipart/form-data">
+            <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+                <div class="icon">&#128229;</div>
+                <p>点击选择文件或拖拽文件到此处</p>
+                <p class="filename" id="filename"></p>
+            </div>
+            <input type="file" name="fileToUpload" id="fileInput">
+            <button type="submit" class="btn" id="uploadBtn" disabled>上传文件</button>
+        </form>
+
+        <div id="result" class="result"></div>
+
+        <div class="file-list">
+            <h3>已上传文件</h3>
+            <ul id="fileList">
+                <li style="color:#aaa">暂无文件</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        var fileInput = document.getElementById('fileInput');
+        var uploadBtn = document.getElementById('uploadBtn');
+        var filenameDisplay = document.getElementById('filename');
+
+        fileInput.addEventListener('change', function(e) {
+            if (e.target.files.length > 0) {
+                filenameDisplay.textContent = e.target.files[0].name;
+                uploadBtn.disabled = false;
+            } else {
+                filenameDisplay.textContent = '';
+                uploadBtn.disabled = true;
+            }
+        });
+
+        document.getElementById('uploadForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            var formData = new FormData(this);
+            var resultDiv = document.getElementById('result');
+            var btn = document.getElementById('uploadBtn');
+
+            btn.textContent = '上传中...';
+            btn.disabled = true;
+
+            fetch('upload.php', { method: 'POST', body: formData })
+                .then(function(r) { return r.text(); })
+                .then(function(data) {
+                    try {
+                        var resp = JSON.parse(data);
+                        if (resp.status === 'success') {
+                            resultDiv.className = 'result success';
+                            resultDiv.textContent = '上传成功: ' + resp.path;
+                            loadFileList();
+                        } else {
+                            resultDiv.className = 'result error';
+                            resultDiv.textContent = '上传失败: ' + resp.message;
+                        }
+                    } catch(err) {
+                        resultDiv.className = 'result error';
+                        resultDiv.textContent = '服务器返回: ' + data;
+                    }
+                    btn.textContent = '上传文件';
+                    btn.disabled = false;
+                    fileInput.value = '';
+                    filenameDisplay.textContent = '';
+                })
+                .catch(function(err) {
+                    resultDiv.className = 'result error';
+                    resultDiv.textContent = '请求失败: ' + err.message;
+                    btn.textContent = '上传文件';
+                    btn.disabled = false;
+                });
+        });
+
+        function loadFileList() {
+            fetch('list.php')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var list = document.getElementById('fileList');
+                    if (data.files && data.files.length > 0) {
+                        list.innerHTML = data.files.map(function(f) {
+                            return '<li><span>' + f.name + ' (' + f.size + ')</span><a href="uploads/' + f.name + '" target="_blank">访问</a></li>';
+                        }).join('');
+                    } else {
+                        list.innerHTML = '<li style="color:#aaa">暂无文件</li>';
+                    }
+                })
+                .catch(function() {});
+        }
+
+        loadFileList();
+    </script>
+</body>
+</html>

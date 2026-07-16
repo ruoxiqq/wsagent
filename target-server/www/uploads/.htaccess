@@ -1,0 +1,13 @@
+# 允许上传目录执行 PHP 脚本（漏洞配置）
+# 正常安全配置应禁止上传目录执行脚本
+<FilesMatch "\.php$">
+    SetHandler application/x-httpd-php
+</FilesMatch>
+
+# 允许所有文件类型访问
+Options -Indexes +FollowSymLinks
+
+# 允许上传的文件被直接访问
+<Files *>
+    Allow from all
+</Files>
