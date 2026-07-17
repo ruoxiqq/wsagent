@@ -33,15 +33,21 @@ echo "[2/5] 部署靶机 Web 服务..."
 bash "$PROJECT_ROOT/target-server/install.sh" 2>/dev/null
 echo "    [+] 靶机 Web 服务部署完成 (端口 8080)"
 
-# ========== 3. 部署防御智能体 ==========
-echo "[3/5] 部署防御智能体..."
+# ========== 3. 部署防御智能体(多智能体版) ==========
+echo "[3/5] 部署多智能体防御系统..."
 DEFENSE_DIR="/opt/defense-agent"
 mkdir -p "$DEFENSE_DIR"
-cp -f "$PROJECT_ROOT/defense-agent/defense_agent.py" "$DEFENSE_DIR/"
-cp -f "$PROJECT_ROOT/defense-agent/defense_console.py" "$DEFENSE_DIR/"
+# 新版多智能体(7 Agent + LLM 大脑)
+cp -f "$PROJECT_ROOT/defense-agent/multi_agent_defense.py" "$DEFENSE_DIR/"
+cp -f "$PROJECT_ROOT/defense-agent/config.py" "$DEFENSE_DIR/"
+cp -f "$PROJECT_ROOT/defense-agent/llm_backend.py" "$DEFENSE_DIR/"
+cp -f "$PROJECT_ROOT/defense-agent/event_bus.py" "$DEFENSE_DIR/"
 cp -f "$PROJECT_ROOT/defense-agent/start-defense.sh" "$DEFENSE_DIR/"
 chmod +x "$DEFENSE_DIR/start-defense.sh"
-echo "    [+] 防御智能体部署到 $DEFENSE_DIR"
+# 保留旧版单体防御作为对照(legacy)
+cp -f "$PROJECT_ROOT/defense-agent/defense_agent.py" "$DEFENSE_DIR/defense_agent_legacy.py"
+cp -f "$PROJECT_ROOT/defense-agent/defense_console.py" "$DEFENSE_DIR/defense_console_legacy.py"
+echo "    [+] 多智能体防御系统部署到 $DEFENSE_DIR"
 
 # ========== 4. 准备 WebShell 样本 ==========
 echo "[4/5] 准备 WebShell 样本..."
@@ -56,7 +62,7 @@ echo "[5/5] 配置权限和防火墙..."
 # 添加 apache 用户到 input 组（键盘记录功能需要）
 usermod -aG input apache 2>/dev/null || true
 
-# 开放 Web 服务端口（C2 端口 4444 不需要在靶机开放，C2 在宿主机上）
+# 开放 Web 服务端口（C2 端口 8888 不需要在靶机开放，C2 在宿主机上）
 firewall-cmd --permanent --add-port=8080/tcp 2>/dev/null || true
 firewall-cmd --reload 2>/dev/null || true
 
@@ -78,11 +84,11 @@ echo "║                                                      ║"
 echo "║  [C2 - Windows 宿主机]                                ║"
 echo "║  启动C2:      双击 c2-server\\start-c2.bat           ║"
 echo "║  或CMD运行:   cd c2-server && python c2_console.py   ║"
-echo "║  C2监听:      0.0.0.0:4444                           ║"
+echo "║  C2监听:      0.0.0.0:8888                           ║"
 echo "║                                                      ║"
 echo "║  防火墙放行(管理员CMD):                               ║"
-echo "║  netsh advfirewall firewall add rule name=\"C2-4444\" ║"
-echo "║  dir=in action=allow protocol=TCP localport=4444     ║"
+echo "║  netsh advfirewall firewall add rule name=\"C2-8888\" ║"
+echo "║  dir=in action=allow protocol=TCP localport=8888     ║"
 echo "║                                                      ║"
 echo "║  详细操作请参考: docs/deployment-guide.md            ║"
 echo "╚══════════════════════════════════════════════════════╝"

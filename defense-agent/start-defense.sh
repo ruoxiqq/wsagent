@@ -23,10 +23,11 @@ if ! command -v python3 &>/dev/null; then
     yum install -y python3 >/dev/null 2>&1
 fi
 
-echo "[*] 启动防御智能体控制台..."
+echo "[*] 启动多智能体防御系统..."
 echo "[*] 首次启动后防护默认关闭，输入 'on' 开启防护"
+echo "[*] LLM 大脑默认 Ollama(http://192.168.163.1:11434)，未启动时自动降级规则评分"
 echo "=========================================="
 echo ""
 
 cd "$SCRIPT_DIR"
-python3 defense_console.py
+python3 multi_agent_defense.py

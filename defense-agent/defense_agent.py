@@ -25,7 +25,7 @@ from datetime import datetime
 # ========== 配置 ==========
 UPLOAD_DIR = '/var/www/vulnerable/uploads/'
 QUARANTINE_DIR = '/tmp/quarantine'
-C2_PORT = 4444
+C2_PORT = 8888
 C2_HOST_IP = '192.168.163.1'  # Windows 宿主机 C2 服务器 IP（跨网络外联检测）
 WEB_SERVER_USER = 'apache'
 KNOWN_BAD_PROCESSES = [
@@ -63,7 +63,7 @@ WEBSHELL_PATTERNS = [
 ]
 
 # 恶意网络连接特征
-SUSPICIOUS_PORTS = [4444, 1337, 31337, 8080, 9999, 5555]
+SUSPICIOUS_PORTS = [8888, 1337, 31337, 8080, 9999, 5555]
 SUSPICIOUS_OUTBOUND = [
     (r'python.*connect', 'Python 反向连接'),
 ]

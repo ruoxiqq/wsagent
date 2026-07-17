@@ -42,10 +42,10 @@ exit /b 1
 echo [*] Python: %PYTHON_CMD%
 %PYTHON_CMD% --version
 echo [*] Working dir: %CD%
-echo [*] Listening port: 4444 (all interfaces)
+echo [*] Listening port: 8888 (all interfaces)
 echo.
-echo [*] Make sure Windows Firewall allows TCP 4444
-echo     Run as Admin: netsh advfirewall firewall add rule name="C2-4444" dir=in action=allow protocol=TCP localport=4444
+echo [*] Make sure Windows Firewall allows TCP 8888
+echo     Run as Admin: netsh advfirewall firewall add rule name="C2-8888" dir=in action=allow protocol=TCP localport=8888
 echo.
 echo ==================================================
 echo   Starting C2 console...
