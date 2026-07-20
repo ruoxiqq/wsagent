@@ -7,12 +7,13 @@
   感知层  : FileSensorAgent / NetworkSensorAgent / ProcessSensorAgent  -- 只看不动
   关联层  : CorrelatorAgent        -- 滑动窗口把多源信号聚类成 incident(确定性快路径)
   研判层  : TriageAgent            -- LLM 大脑推理(ReAct)，失败降级为规则评分
-  响应层  : ResponderAgent         -- 分级响应 + 可撤销
+  响应层  : ResponderAgent         -- LLM 工具调用(Function Calling)驱动的动作执行器 + 可撤销 + 人工确认
   取证层  : ForensicsAgent         -- 证据链 + 误报学习
 
-智能体的"智能"集中在 TriageAgent: 它把关联后的事件交给 LLM 做推理判断，
-能识别规则引擎覆盖不到的未知/变形攻击，并给出可解释的判定依据。
-当 LLM 不可用时自动降级为确定性规则评分，保证演示不中断。
+智能体的"智能"集中在 TriageAgent + ResponderAgent: TriageAgent 把关联后的事件交给
+LLM 做推理判断(识别规则引擎覆盖不到的未知/变形攻击, 给出可解释判定), 并以工具调用
+(Function Calling)形式产出处置动作; ResponderAgent 经护栏校验后由有界执行器完成动作。
+当 LLM 不可用时自动降级为确定性规则评分+固定分级, 保证演示不中断。
 
 安全警告：本程序为安全教学演示用的防御智能体！需 root 权限(iptables/kill)。
 """
@@ -33,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 from event_bus import EventBus
 from llm_backend import llm
+from action_executor import ActionExecutor, tool_catalog_text
 
 # ANSI 颜色
 C_RED = '\033[91m'
@@ -61,13 +63,28 @@ class Blackboard:
         self.undo_lock = threading.Lock()
         self.fp_learnings = {}       # 误报特征 -> 次数
         self.fp_lock = threading.Lock()
+        self.pending_actions = []     # 待人工确认的高危动作 [{aid,incident_id,tool,args,status}]
+        self.pending_lock = threading.Lock()
+        # 已处置进程的 cmd 特征监控名单: 用于杀掉"自拉起/重生"的 Beacon
+        self.kill_watchlist = []
+        self.kill_watchlist_lock = threading.Lock()
         self._inc_ctr = 0
+        self._act_ctr = 0
         self._ctr_lock = threading.Lock()
 
     def new_incident_id(self):
         with self._ctr_lock:
             self._inc_ctr += 1
             return self._inc_ctr
+
+    def new_action_id(self):
+        with self._ctr_lock:
+            self._act_ctr += 1
+            return self._act_ctr
+
+    def pending_count(self):
+        with self.pending_lock:
+            return len([p for p in self.pending_actions if p['status'] == 'PENDING'])
 
     def add_alert(self, level, category, message, detail=''):
         with self.alerts_lock:
@@ -194,54 +211,138 @@ class FileSensorAgent(BaseAgent):
 # 感知层：网络感知 Agent
 # ============================================================
 class NetworkSensorAgent(BaseAgent):
-    """用 ss 检测到 C2 端口/IP 的外联，发布 raw.net 事件。"""
+    """网络感知 Agent: 既检测 C2 外联, 也做行为分析识别内网横向移动/端口扫描。
+    解析 ss 全量连接, 按进程聚合其内网目标 IP/端口, 超过阈值即判定横向移动并
+    发布 kind='lateral' 的 raw.net 事件(携带 pid / internal_ips / internal_ports),
+    供研判层触发 block_subnet / kill_process_tree 等处置原语。"""
 
     def __init__(self, bus, bb):
         super().__init__(bus, bb, 'NetSensor')
-        self.recent = {}  # (peer,pid) -> last_emit
+        self.recent = {}      # C2 事件节流: (peer,proc) -> last_emit
+        self.behavior = {}    # 内网行为: key(pid/proc) -> [(time,ip,port,pid,proc,local)]
+        self.recent_lat = {}  # 横向移动事件节流: (key,reason) -> last_emit
+
+    @staticmethod
+    def _parse_connection(line):
+        if 'LISTEN' in line:
+            return None
+        parts = line.split()
+        if len(parts) < 6:
+            return None
+        local = parts[4]
+        peer = parts[5]
+        proc = parts[-1]
+
+        def _split_addr(a):
+            if ':' not in a:
+                return None, None
+            ip, _, port = a.rpartition(':')
+            return ip, port
+        lip, lport = _split_addr(local)
+        pip, pport = _split_addr(peer)
+        if not pip:
+            return None
+        try:
+            pport_i = int(pport)
+        except ValueError:
+            pport_i = None
+        m = re.search(r'pid=(\d+)', proc)
+        pid = m.group(1) if m else None
+        return {'local_ip': lip, 'local_port': lport,
+                'peer_ip': pip, 'peer_port': pport_i,
+                'proc': proc, 'pid': pid}
+
+    def _collect(self):
+        try:
+            result = subprocess.run(['ss', '-tunap'], capture_output=True,
+                                    text=True, timeout=5)
+        except Exception:
+            return []
+        conns = []
+        for line in result.stdout.split('\n'):
+            c = self._parse_connection(line)
+            if c and c['peer_ip']:
+                conns.append(c)
+        return conns
 
     def run(self):
+        sub = '内网监控:%s' % (','.join(config.INTERNAL_SUBNETS) or '无')
         self.bb.add_alert('INFO', 'NETWORK', '网络感知 Agent 启动',
-                          'C2端口:%s C2_IP:%s' % (config.C2_PORT, config.C2_HOST_IP))
+                          'C2端口:%s C2_IP:%s | %s' % (
+                              config.C2_PORT, config.C2_HOST_IP, sub))
         while self.bb.running:
             if not self.bb.active:
                 time.sleep(2)
                 continue
             try:
-                result = subprocess.run(['ss', '-tunap'], capture_output=True,
-                                        text=True, timeout=5)
-                for line in result.stdout.split('\n'):
-                    is_port = str(config.C2_PORT) in line
-                    is_ip = config.C2_HOST_IP in line
-                    if not (is_port or is_ip):
-                        continue
-                    if 'LISTEN' in line:
-                        continue
-                    if 'ESTAB' not in line and 'SYN' not in line:
-                        continue
-                    parts = line.split()
-                    if len(parts) < 6:
-                        continue
-                    local_addr = parts[4]
-                    peer_addr = parts[5]
-                    proc_info = parts[-1] if parts else ''
-                    key = (peer_addr, proc_info)
-                    now = time.time()
-                    if now - self.recent.get(key, 0) < 10:
-                        continue
-                    self.recent[key] = now
-                    reason = 'C2端口' if is_port else 'C2主机IP'
-                    self.bus.publish('raw.net', {
-                        'time': now,
-                        'source': 'NetSensor',
-                        'local': local_addr,
-                        'peer': peer_addr,
-                        'reason': reason,
-                        'process': proc_info,
-                    })
-            except Exception:
-                pass
+                self._scan_once()
+            except Exception as e:
+                self.bb.add_alert('WARNING', 'NETWORK', '网络感知异常', str(e))
             time.sleep(config.INTERVAL_NET)
+
+    def _scan_once(self):
+        now = time.time()
+        conns = self._collect()
+        for c in conns:
+            is_port = (c['peer_port'] == config.C2_PORT)
+            is_ip = (c['peer_ip'] == config.C2_HOST_IP)
+            if is_port or is_ip:
+                self._emit_c2(c, now, 'C2端口' if is_port else 'C2主机IP')
+            elif config.ip_in_cidrs(c['peer_ip'], config.INTERNAL_SUBNETS):
+                self._record_internal(c, now)
+        self._evaluate_lateral(now)
+
+    def _emit_c2(self, c, now, reason):
+        key = (c['peer_ip'], c['proc'])
+        if now - self.recent.get(key, 0) < 10:
+            return
+        self.recent[key] = now
+        self.bus.publish('raw.net', {
+            'time': now, 'source': 'NetSensor',
+            'local': c['local_ip'], 'peer': c['peer_ip'],
+            'reason': reason, 'process': c['proc'],
+            'kind': 'c2', 'pid': c['pid'],
+        })
+
+    def _record_internal(self, c, now):
+        key = c['pid'] or c['proc'] or c['peer_ip']
+        rec = self.behavior.setdefault(key, [])
+        rec.append((now, c['peer_ip'], c['peer_port'], c['pid'], c['proc'], c['local_ip']))
+        self.behavior[key] = [t for t in rec if now - t[0] <= config.NET_WINDOW]
+
+    def _evaluate_lateral(self, now):
+        for key, rec in list(self.behavior.items()):
+            if not rec:
+                self.behavior.pop(key, None)
+                continue
+            ips = set(t[1] for t in rec)
+            ports = set(t[2] for t in rec if t[2] is not None)
+            reasons = []
+            if len(ips) >= config.LATERAL_DISTINCT_IPS:
+                reasons.append('横向移动: 同进程连接 %d 个内网IP' % len(ips))
+            if len(ports) >= config.LATERAL_DISTINCT_PORTS:
+                reasons.append('纵向端口扫描: 连接 %d 个不同端口' % len(ports))
+            if not reasons:
+                continue
+            sig = tuple(sorted(reasons))
+            lkey = (key, sig)
+            if now - self.recent_lat.get(lkey, 0) < config.NET_WINDOW:
+                continue
+            self.recent_lat[lkey] = now
+            pid = rec[-1][3]
+            proc = rec[-1][4]
+            local = rec[-1][5]
+            self.bus.publish('raw.net', {
+                'time': now, 'source': 'NetSensor',
+                'local': local,
+                'peer': sorted(ips)[0] if ips else '',
+                'reason': '; '.join(reasons),
+                'process': proc,
+                'kind': 'lateral',
+                'pid': pid,
+                'internal_ips': sorted(ips),
+                'internal_ports': sorted(p for p in ports if p is not None),
+            })
 
 
 # ============================================================
@@ -269,6 +370,13 @@ class ProcessSensorAgent(BaseAgent):
                         continue
                     user, pid, command = parts[0], parts[1], parts[10]
                     reason = self._is_suspicious(user, command)
+                    watch = False
+                    if not reason:
+                        # 命中"已封禁进程监控名单" -> 视为自拉起重生, 强制上报
+                        w = self._watch_match(command)
+                        if w:
+                            reason = '已封禁进程重生(命中监控:%s)' % w[:40]
+                            watch = True
                     if not reason:
                         continue
                     if pid in self.emitted:
@@ -281,6 +389,7 @@ class ProcessSensorAgent(BaseAgent):
                         'user': user,
                         'cmd': command[:300],
                         'reason': reason,
+                        'watch': watch,
                     })
             except Exception:
                 pass
@@ -296,6 +405,14 @@ class ProcessSensorAgent(BaseAgent):
         if user == config.WEB_SERVER_USER and 'python' in command.lower():
             if '/tmp/' in command or 'beacon' in command.lower():
                 return 'Web 服务用户运行可疑 Python'
+        return None
+
+    def _watch_match(self, command):
+        """进程 cmd 是否命中"已封禁进程监控名单"(自拉起防护)。"""
+        with self.bb.kill_watchlist_lock:
+            for tok in self.bb.kill_watchlist:
+                if tok and tok in command:
+                    return tok
         return None
 
 
@@ -339,18 +456,24 @@ class CorrelatorAgent(BaseAgent):
         files = [e for _, t, e in self.window if t == 'raw.file' and e.get('is_malicious')]
         procs = [e for _, t, e in self.window if t == 'raw.proc']
         nets = [e for _, t, e in self.window if t == 'raw.net']
+        c2 = [e for e in nets if e.get('kind') != 'lateral']
+        laterals = [e for e in nets if e.get('kind') == 'lateral']
 
-        sig = (len(files) > 0, len(procs) > 0, len(nets) > 0)
+        sig = (len(files) > 0, len(procs) > 0, len(c2) > 0, len(laterals) > 0)
         # 需要有新信号且与上次不同才发
         if sig == self.last_incident_sig and now - self.last_incident_time < config.CORRELATION_WINDOW:
             return
 
         incident = None
-        if nets and procs:
+        if laterals and procs:
+            incident = self._build('高危', '内网横向移动 + 可疑进程', files, procs, nets)
+        elif laterals:
+            incident = self._build('高危', '内网横向移动/端口扫描', files, procs, nets)
+        elif c2 and procs:
             incident = self._build('高危', '命令控制外联 + 可疑进程', files, procs, nets)
         elif files and procs:
             incident = self._build('中危', 'WebShell 上传 + 执行', files, procs, nets)
-        elif nets:
+        elif c2:
             incident = self._build('中高危', 'C2 外联通信', files, procs, nets)
         elif files and config.SINGLE_SIGNAL_HIGH_RISK:
             incident = self._build('低中危', 'WebShell 上传', files, procs, nets)
@@ -377,9 +500,13 @@ class CorrelatorAgent(BaseAgent):
                 'files': [{'filename': f['filename'], 'matches': f['matches'],
                             'path': f['path']} for f in files[-3:]],
                 'processes': [{'pid': p['pid'], 'user': p['user'],
-                                'cmd': p['cmd'][:120], 'reason': p['reason']} for p in procs[-3:]],
-                'network': [{'local': n['local'], 'peer': n['peer'],
-                              'reason': n['reason'], 'process': n['process']} for n in nets[-3:]],
+                                'cmd': p['cmd'][:120], 'reason': p['reason'],
+                                'watch': p.get('watch', False)} for p in procs[-3:]],
+                'network': [{'local': n.get('local'), 'peer': n.get('peer'),
+                              'reason': n.get('reason'), 'process': n.get('process'),
+                              'kind': n.get('kind'), 'pid': n.get('pid'),
+                              'internal_ips': n.get('internal_ips'),
+                              'internal_ports': n.get('internal_ports')} for n in nets[-3:]],
             }
         }
 
@@ -387,17 +514,70 @@ class CorrelatorAgent(BaseAgent):
 # ============================================================
 # 研判层：TriageAgent (LLM 大脑 + 规则降级)
 # ============================================================
+def derive_actions(conf, incident):
+    """按置信度分级, 从 incident.signals 派生处置动作(供规则降级与 LLM 无 actions 时兜底)。
+
+    关键改动:
+      - 已确认的 C2 外联(kind='c2')视为强 IoC, 无论置信度高低一律阻断对端 IP;
+      - 与 C2 关联的进程改用 kill_process_tree 杀整棵树, 更抗自拉起;
+      - 横向移动仍按原阈值处置。
+    """
+    sig = incident.get('signals', {})
+    actions = []
+    nets = sig.get('network', [])
+    laterals = [n for n in nets if n.get('kind') == 'lateral']
+    c2 = [n for n in nets if n.get('kind') == 'c2']
+    # 1) 已确认 C2: 无条件阻断对端 IP(强 IoC, 且 iptables 规则幂等, 可 undo)
+    if c2:
+        seen = set()
+        for n in c2:
+            m = re.search(r'(\d+\.\d+\.\d+\.\d+)', n.get('peer', ''))
+            if m and m.group(1) not in seen:
+                seen.add(m.group(1))
+                actions.append({'tool': 'block_ip', 'args': {'ip': m.group(1)}})
+    # 2) 隔离文件(达到 ISOLATE 门槛)
+    if conf >= config.TIER_ISOLATE:
+        for f in sig.get('files', []):
+            p = f.get('path', '')
+            if p:
+                actions.append({'tool': 'quarantine_file', 'args': {'path': p}})
+    # 3) 横向移动: 阻断内网靶机网段(达 BLOCK 门槛才做, 避免误伤正常内网)
+    if conf >= config.TIER_BLOCK and laterals and config.INTERNAL_SUBNETS:
+        actions.append({'tool': 'block_subnet',
+                        'args': {'cidr': config.INTERNAL_SUBNETS[0]}})
+    # 4) 终止进程(>=85): 与 C2 关联用 kill_process_tree 杀整棵树, 否则单 kill
+    if conf >= 85:
+        for p in sig.get('processes', []):
+            if c2:
+                actions.append({'tool': 'kill_process_tree',
+                                'args': {'ppid': p.get('pid', ''), 'cmd': p.get('cmd', '')}})
+            else:
+                actions.append({'tool': 'kill_process',
+                                'args': {'pid': p.get('pid', ''), 'cmd': p.get('cmd', '')}})
+        for n in laterals:
+            pid = n.get('pid')
+            if pid:
+                actions.append({'tool': 'kill_process_tree', 'args': {'ppid': pid}})
+    return actions
+
+
 class TriageAgent(BaseAgent):
     """智能所在：把 incident 喂给 LLM 推理，得可解释判定；LLM 不可用则规则评分。"""
 
     SYSTEM_PROMPT = (
-        "你是一名网络安全研判分析智能体。你将收到来自多个感知智能体关联后的安全事件证据。\n"
-        "请判断这是否是一次真实攻击，识别攻击所处的 kill-chain 阶段"
-        "(侦察/武器化/投递/利用/安装/命令控制/行动)，给出 0-100 的置信度，\n"
-        "用一句话中文说明推理依据，并推荐处置强度。\n"
-        "只返回 JSON，不要任何额外文字。格式:\n"
+        "你是一名网络安全研判与处置智能体。你将收到多个感知智能体关联后的安全事件证据。\n"
+        "请判断是否是真实攻击, 识别 kill-chain 阶段"
+        "(侦察/武器化/投递/利用/安装/命令控制/行动), 给出 0-100 置信度, \n"
+        "用一句话中文说明依据, 并决定应执行的处置动作列表 actions。\n"
+        "你只能从下方工具箱中选择动作, 并填入参数(优先从 incident.signals 取 path/ip/pid/cmd)。\n"
+        "若证据显示内网横向移动(同进程连多个内网 IP, 或连 445/22/3389/5985 等端口), "
+        "可调用 block_subnet(阻断内网靶机网段) 或 kill_process_tree(终止枢轴进程树)。\n"
+        "网络证据字段说明: kind='c2'(外联C2) 或 'lateral'(内网横向移动); "
+        "lateral 证据额外含 internal_ips(被扫描的内网IP列表)、internal_ports(端口列表)、pid(发起进程)。\n"
+        "只返回 JSON, 不要额外文字。格式:\n"
         '{"is_attack": true/false, "stage": "阶段名", "confidence": 0-100, '
-        '"reasoning": "中文一句话", "response": "alert|isolate|block|kill"}'
+        '"reasoning": "中文一句话", "actions": [{"tool": "工具名", "args": {参数}}]}'
+        "\n可用工具箱:\n" + tool_catalog_text() + "\n"
     )
 
     def __init__(self, bus, bb):
@@ -461,12 +641,16 @@ class TriageAgent(BaseAgent):
 
     def _coerce(self, obj):
         try:
+            actions = obj.get('actions', []) or []
+            if not isinstance(actions, list):
+                actions = []
             return {
                 'is_attack': bool(obj.get('is_attack', True)),
                 'stage': str(obj.get('stage', '未知')),
                 'confidence': int(float(obj.get('confidence', 50))),
                 'reasoning': str(obj.get('reasoning', '')),
                 'response': str(obj.get('response', 'alert')),
+                'actions': actions,
             }
         except Exception:
             return None
@@ -475,12 +659,23 @@ class TriageAgent(BaseAgent):
         sig = incident.get('signals', {})
         score = 0
         reasons = []
-        if sig.get('network'):
+        nets = sig.get('network', [])
+        c2_nets = [n for n in nets if n.get('kind') == 'c2']
+        has_lateral = any(n.get('kind') == 'lateral' for n in nets)
+        procs = sig.get('processes', [])
+        watch_hit = any(p.get('watch') for p in procs)
+        if nets:
             score += 40
             reasons.append('C2外联(+40)')
-        if sig.get('processes'):
+        if has_lateral:
+            score += 45
+            reasons.append('内网横向移动(+45)')
+        if procs:
             score += 30
             reasons.append('可疑进程(+30)')
+        if watch_hit:
+            score += 30
+            reasons.append('已封禁进程重生(+30)')
         files = sig.get('files', [])
         if files:
             mx = max((len(f.get('matches', [])) for f in files), default=0)
@@ -490,7 +685,7 @@ class TriageAgent(BaseAgent):
             elif mx >= 1:
                 score += 10
                 reasons.append('WebShell命中1(+10)')
-        if sig.get('network') and sig.get('processes') and files:
+        if nets and procs and files:
             score += 15
             reasons.append('多源关联(+15)')
         # 误报学习：命中 FP 特征则降分
@@ -499,14 +694,25 @@ class TriageAgent(BaseAgent):
             score = max(0, score - 25)
             reasons.append('命中误报特征(-25)')
         score = min(score, 100)
-        resp = 'alert' if score < 40 else ('isolate' if score < 70 else
-                  ('block' if score < 85 else 'kill'))
+        actions = derive_actions(score, incident)
+        # 已确认 C2 或命中被监控名单 -> 一定判为攻击
+        is_attack = score >= 40 or bool(c2_nets) or watch_hit
+        # 处置等级: 确认 C2 至少 block; 其余按置信度
+        if score >= 85:
+            response = 'kill'
+        elif score >= 80 or c2_nets:
+            response = 'block'
+        elif score >= 60:
+            response = 'isolate'
+        else:
+            response = 'alert'
         return {
-            'is_attack': score >= 40,
-            'stage': '命令控制' if sig.get('network') else ('利用' if files else '未知'),
+            'is_attack': is_attack,
+            'stage': '命令控制' if nets else ('利用' if files else '未知'),
             'confidence': score,
             'reasoning': '规则评分: ' + ' '.join(reasons),
-            'response': resp,
+            'response': response,
+            'actions': actions,
             'source': 'rules',
         }
 
@@ -527,16 +733,19 @@ class TriageAgent(BaseAgent):
 
 
 # ============================================================
-# 响应层：ResponderAgent (分级响应 + 可撤销)
+# 响应层：ResponderAgent (LLM 工具调用驱动 + 护栏 + 可撤销 + 人工确认)
 # ============================================================
 class ResponderAgent(BaseAgent):
-    """按置信度/建议分级处置：告警→隔离→阻断→终止，动作可撤销。"""
+    """LLM 以 Function-Calling 产出动作列表, 本 Agent 经护栏校验后由有界执行器完成;
+    高危动作可人工确认(approve), 所有可逆动作可撤销(undo)。"""
 
-    def __init__(self, bus, bb):
+    def __init__(self, bus, bb, executor):
         super().__init__(bus, bb, 'Responder')
+        self.executor = executor
 
     def run(self):
-        self.bb.add_alert('INFO', 'SYSTEM', '响应处置 Agent 启动', '分级响应')
+        self.bb.add_alert('INFO', 'SYSTEM', '响应处置 Agent 启动',
+                          'LLM 工具调用 + 护栏 + 可撤销')
         q = self.bus.subscribe('verdict')
         while self.bb.running:
             try:
@@ -549,104 +758,103 @@ class ResponderAgent(BaseAgent):
         incident = msg['incident']
         v = msg['verdict']
         conf = int(v.get('confidence', 0))
-        resp = v.get('response', 'alert')
-        # 建议提升
-        if resp == 'kill':
-            conf = max(conf, 85)
-        elif resp == 'block':
-            conf = max(conf, 80)
-        elif resp == 'isolate':
-            conf = max(conf, 60)
+        src = v.get('source', 'rules')
 
+        # LLM 产出的动作; 没有则用规则分级兜底
+        actions = v.get('actions') or derive_actions(conf, incident)
+        # 用信号补全 kill 动作所需的 cmd(用于清理其丢弃的临时文件)
         sig = incident.get('signals', {})
-        undo_bundle = {'incident_id': incident['id'], 'items': []}
-        taken = []
+        procs_by_pid = {p.get('pid'): p for p in sig.get('processes', [])}
+        for a in actions:
+            if a.get('tool') in ('kill_process', 'kill_process_tree'):
+                pid = (a.get('args') or {}).get('pid') or (a.get('args') or {}).get('ppid')
+                if pid and pid in procs_by_pid and 'cmd' not in (a.get('args') or {}):
+                    a.setdefault('args', {})['cmd'] = procs_by_pid[pid].get('cmd', '')
 
-        if not v.get('is_attack') and conf < config.TIER_ALERT:
+        # 自拉起防护: 命中"已封禁进程监控名单"的进程, 无论置信度直接杀整棵树
+        for p in sig.get('processes', []):
+            if self._proc_in_watch(p.get('cmd', '')):
+                pid = p.get('pid')
+                if pid:
+                    actions.append({'tool': 'kill_process_tree',
+                                    'args': {'ppid': pid, 'cmd': p.get('cmd', '')}})
+
+        # 防御纵深: 确认 C2 外联无论研判来源(LLM/规则)一律阻断对端 IP
+        for n in sig.get('network', []):
+            if n.get('kind') == 'c2':
+                m = re.search(r'(\d+\.\d+\.\d+\.\d+)', n.get('peer', ''))
+                if m:
+                    ip = m.group(1)
+                    if not any(a.get('tool') == 'block_ip'
+                               and a.get('args', {}).get('ip') == ip for a in actions):
+                        actions.append({'tool': 'block_ip', 'args': {'ip': ip}})
+
+        # 完全不是攻击、低置信、无动作 -> 仅记录
+        if not v.get('is_attack', True) and conf < config.TIER_ALERT and not actions:
             self.bb.add_alert('INFO', 'RESPONSE',
                               '事件 #%d 置信度低，仅记录不处置' % incident['id'], '')
             return
 
         self.bb.threats_blocked += 1
+        taken = []
+        undo_items = []
 
-        # 隔离文件
-        if conf >= config.TIER_ISOLATE:
-            for f in sig.get('files', []):
-                ok, info = self._quarantine(f.get('path', ''))
-                taken.append('隔离 %s' % f.get('filename', ''))
-                if ok:
-                    undo_bundle['items'].append(info)
-
-        # 阻断网络
-        if conf >= config.TIER_BLOCK:
-            for n in sig.get('network', []):
-                ok, info = self._block(n.get('peer', ''))
-                if ok:
-                    taken.append('阻断 %s' % n.get('peer', ''))
-                    undo_bundle['items'].append(info)
-
-        # 终止进程 + 删除文件
-        if conf >= 85 or resp == 'kill':
-            for p in sig.get('processes', []):
-                self._kill(p.get('pid', ''))
-                taken.append('终止 PID %s' % p.get('pid', ''))
-            for bad in config.KNOWN_BAD_PROCESSES:
-                if os.path.exists('/tmp/.system_update.py') and bad == '/tmp/.system_update.py':
-                    try:
-                        os.remove('/tmp/.system_update.py')
-                        taken.append('删除 /tmp/.system_update.py')
-                    except Exception:
-                        pass
+        for a in actions:
+            ok, reason = self.executor.validate(a)
+            if not ok:
+                self.bb.add_alert('WARNING', 'RESPONSE',
+                                  '动作校验失败 %s: %s' % (a.get('tool'), reason), '')
+                taken.append('[拒绝]%s:%s' % (a.get('tool'), reason))
+                continue
+            if self.executor.needs_approval(a['tool']):
+                aid = self.bb.new_action_id()
+                with self.bb.pending_lock:
+                    self.bb.pending_actions.append({
+                        'aid': aid, 'incident_id': incident['id'],
+                        'tool': a['tool'], 'args': a.get('args', {}), 'status': 'PENDING'})
+                tgt = self.executor._target(a['tool'], a.get('args', {}))
+                taken.append('[待审批#%d]%s %s' % (aid, a['tool'], tgt))
+                self.bb.add_alert('WARNING', 'RESPONSE',
+                                  '事件#%d 高危动作待确认: %s (输入 approve %d)' % (
+                                      incident['id'], a['tool'], aid), '')
+            else:
+                ok2, res, undo = self.executor.execute(a)
+                taken.append('%s %s' % (a['tool'], res))
+                if undo:
+                    undo_items.append(undo)
+                # 处置攻击性进程后, 记录其 cmd 到监控名单, 杀掉自拉起重生
+                if a['tool'] in ('kill_process', 'kill_process_tree') and v.get('is_attack'):
+                    self._add_watch((a.get('args') or {}).get('cmd', ''))
 
         self.bb.add_alert('CRITICAL', 'RESPONSE',
-                          '事件 #%d 处置完成(置信度%d): %s' % (
-                              incident['id'], conf, ' | '.join(taken) if taken else '仅告警'),
+                          '事件 #%d 处置完成(置信度%d/%s): %s' % (
+                              incident['id'], conf, src,
+                              ' | '.join(taken) if taken else '仅告警'),
                           v.get('reasoning', ''))
-        if undo_bundle['items']:
+        if undo_items:
             with self.bb.undo_lock:
-                self.bb.undo_stack.append(undo_bundle)
+                self.bb.undo_stack.append(
+                    {'incident_id': incident['id'], 'items': undo_items})
         self.bus.publish('action', {'incident_id': incident['id'], 'taken': taken,
                                     'confidence': conf})
 
-    def _quarantine(self, path):
-        try:
-            if not path or not os.path.exists(path):
-                return False, None
-            os.makedirs(config.QUARANTINE_DIR, exist_ok=True)
-            dst = os.path.join(config.QUARANTINE_DIR,
-                               os.path.basename(path) + '.' + str(int(time.time())))
-            os.rename(path, dst)
-            self.bb.add_action('QUARANTINE', path, '-> ' + dst,
-                               undo={'type': 'quarantine', 'src': path, 'dst': dst})
-            return True, {'type': 'quarantine', 'src': path, 'dst': dst}
-        except Exception as e:
-            self.bb.add_action('QUARANTINE', path, '失败: ' + str(e))
-            return False, None
+    def _proc_in_watch(self, cmd):
+        if not cmd:
+            return False
+        with self.bb.kill_watchlist_lock:
+            return any(tok and tok in cmd for tok in self.bb.kill_watchlist)
 
-    def _block(self, peer):
-        try:
-            m = re.search(r'(\d+\.\d+\.\d+\.\d+)', peer)
-            if not m:
-                return False, None
-            ip = m.group(1)
-            subprocess.run(['iptables', '-A', 'OUTPUT', '-d', ip, '-j', 'DROP'],
-                           capture_output=True, timeout=5)
-            self.bb.add_action('BLOCK_IP', ip, 'iptables OUTPUT DROP',
-                               undo={'type': 'block', 'ip': ip})
-            return True, {'type': 'block', 'ip': ip}
-        except Exception as e:
-            self.bb.add_action('BLOCK_IP', peer, '失败: ' + str(e))
-            return False, None
-
-    def _kill(self, pid):
-        try:
-            subprocess.run(['kill', '-9', str(pid)], capture_output=True, timeout=5)
-            self.bb.add_action('KILL', pid, '已终止')
-        except Exception as e:
-            self.bb.add_action('KILL', pid, '失败: ' + str(e))
+    def _add_watch(self, cmd):
+        cmd = (cmd or '').strip()
+        if not cmd:
+            return
+        tok = cmd[:120]
+        with self.bb.kill_watchlist_lock:
+            if tok not in self.bb.kill_watchlist:
+                self.bb.kill_watchlist.append(tok)
 
     def undo_last(self):
-        """撤销最近一组可逆处置。"""
+        """撤销最近一组可逆处置(支持 quarantine/block/block_subnet/disable_account)。"""
         with self.bb.undo_lock:
             if not self.bb.undo_stack:
                 return False, '无可撤销处置'
@@ -662,6 +870,13 @@ class ResponderAgent(BaseAgent):
                     subprocess.run(['iptables', '-D', 'OUTPUT', '-d', item['ip'], '-j', 'DROP'],
                                    capture_output=True, timeout=5)
                     undone.append('移除阻断 %s' % item['ip'])
+                elif item['type'] == 'block_subnet':
+                    subprocess.run(['iptables', '-D', 'OUTPUT', '-d', item['cidr'], '-j', 'DROP'],
+                                   capture_output=True, timeout=5)
+                    undone.append('移除网段阻断 %s' % item['cidr'])
+                elif item['type'] == 'disable_account':
+                    subprocess.run(['usermod', '-U', item['user']], capture_output=True, timeout=5)
+                    undone.append('解锁账户 %s' % item['user'])
             except Exception as e:
                 undone.append('撤销失败 %s: %s' % (item, e))
         self.bb.add_alert('INFO', 'RESPONSE',
@@ -727,7 +942,8 @@ class MultiAgentDefense:
         self.proc_sensor = ProcessSensorAgent(self.bus, self.bb)
         self.correlator = CorrelatorAgent(self.bus, self.bb)
         self.triage = TriageAgent(self.bus, self.bb)
-        self.responder = ResponderAgent(self.bus, self.bb)
+        self.executor = ActionExecutor(self.bb, hitl=config.HITL_DESTRUCTIVE)
+        self.responder = ResponderAgent(self.bus, self.bb, self.executor)
         self.forensics = ForensicsAgent(self.bus, self.bb)
         self.agents = [self.file_sensor, self.net_sensor, self.proc_sensor,
                        self.correlator, self.triage, self.responder, self.forensics]
@@ -773,6 +989,8 @@ class MultiAgentDefense:
             print("  事件总数:   %d" % len(b.incidents))
         with b.undo_lock:
             print("  可撤销处置: %d 组" % len(b.undo_stack))
+        pc = b.pending_count()
+        print("  待审批动作: %d 个%s" % (pc, C_YEL + ' (输入 pending 查看)' + C_RST if pc else ''))
         with b.fp_lock:
             print("  误报学习:   %d 条" % len(b.fp_learnings))
         print("  " + "=" * 56)
@@ -832,14 +1050,28 @@ class MultiAgentDefense:
         if sig.get('network'):
             print("  [网络证据]")
             for n in sig['network']:
-                print("    - %s -> %s  (%s)" % (n['local'], n['peer'], n['reason']))
+                kind = n.get('kind')
+                tag = ' [横向移动]' if kind == 'lateral' else (' [C2]' if kind == 'c2' else '')
+                print("    - %s -> %s  (%s)%s" % (n.get('local'), n.get('peer'),
+                                                  n.get('reason'), tag))
+                if n.get('internal_ips'):
+                    print("        内网目标: %s  端口: %s" % (
+                        ', '.join(n['internal_ips']),
+                        ', '.join(str(p) for p in (n.get('internal_ports') or []))))
         v = inc.get('verdict')
         if v:
             print("  [研判结论]")
             print("    攻击: %s  |  阶段: %s  |  置信度: %s" % (
                 v.get('is_attack'), v.get('stage'), v.get('confidence')))
             print("    依据: %s" % v.get('reasoning'))
-            print("    来源: %s  |  建议: %s" % (v.get('source'), v.get('response')))
+            print("    来源: %s" % v.get('source'))
+            acts = v.get('actions') or []
+            if acts:
+                print("    建议动作(LLM 工具调用):")
+                for a in acts:
+                    print("      - %s(%s)" % (a.get('tool'), a.get('args')))
+            else:
+                print("    建议: %s" % v.get('response'))
         tl = inc.get('timeline', [])
         if tl:
             print("  [处置时间线]")
@@ -865,6 +1097,68 @@ class MultiAgentDefense:
             return
         ok, msg = self.forensics.mark_fp(inc_id)
         print(("  [+] " if ok else "  [!] ") + msg)
+
+    def cmd_pending(self):
+        with self.bb.pending_lock:
+            items = [p for p in self.bb.pending_actions if p['status'] == 'PENDING']
+        if not items:
+            print("  [!] 暂无待审批动作")
+            return
+        print("  " + "=" * 56)
+        print("  待人工确认的高危动作:")
+        for p in items:
+            tgt = self.executor._target(p['tool'], p['args'])
+            print("    #%d  事件#%d  %s %s" % (p['aid'], p['incident_id'], p['tool'], tgt))
+        print("  执行: approve <ID> | approve all   拒绝: deny <ID> | deny all")
+        print("  " + "=" * 56)
+
+    def cmd_approve(self, token):
+        if token == 'all':
+            with self.bb.pending_lock:
+                todo = [p for p in self.bb.pending_actions if p['status'] == 'PENDING']
+        else:
+            try:
+                aid = int(token)
+            except ValueError:
+                print("  [!] 用法: approve <动作ID>|all")
+                return
+            with self.bb.pending_lock:
+                todo = [p for p in self.bb.pending_actions
+                        if p['status'] == 'PENDING' and p['aid'] == aid]
+        if not todo:
+            print("  [!] 无匹配的待审批动作")
+            return
+        for p in todo:
+            p['status'] = 'APPROVED'
+            ok, res, undo = self.executor.execute(
+                {'tool': p['tool'], 'args': p['args']})
+            if undo:
+                with self.bb.undo_lock:
+                    self.bb.undo_stack.append(
+                        {'incident_id': p['incident_id'], 'items': [undo]})
+            self.bb.add_alert('INFO', 'RESPONSE',
+                              '已批准执行 #%d: %s -> %s' % (p['aid'], p['tool'], res), '')
+            print(C_GRN + "  [+] 已执行 #%d: %s %s" % (p['aid'], p['tool'], res) + C_RST)
+
+    def cmd_deny(self, token):
+        if token == 'all':
+            with self.bb.pending_lock:
+                todo = [p for p in self.bb.pending_actions if p['status'] == 'PENDING']
+        else:
+            try:
+                aid = int(token)
+            except ValueError:
+                print("  [!] 用法: deny <动作ID>|all")
+                return
+            with self.bb.pending_lock:
+                todo = [p for p in self.bb.pending_actions
+                        if p['status'] == 'PENDING' and p['aid'] == aid]
+        if not todo:
+            print("  [!] 无匹配的待审批动作")
+            return
+        for p in todo:
+            p['status'] = 'DENIED'
+            print(C_YEL + "  [!] 已拒绝 #%d: %s" % (p['aid'], p['tool']) + C_RST)
 
     def cmd_incidents(self):
         with self.bb.incidents_lock:
@@ -907,12 +1201,15 @@ def main():
     signal.signal(signal.SIGTERM, sig_handler)
 
     print()
-    print("命令: on | off | status | alerts | actions | incidents | report [id] | log | undo | fp <id> | exit")
+    print("命令: on | off | status | alerts | actions | incidents | report [id] | log | undo | fp <id> | pending | approve <ID>|all | deny <ID>|all | exit")
     print("  on/off        开关防护(对比有无防御)")
     print("  log           查看 LLM 调用日志(是否真调了 API / 成功或失败)")
-    print("  report [id]   查看取证报告(LLM 研判依据)")
+    print("  report [id]   查看取证报告(LLM 研判依据 + 建议动作)")
     print("  undo          撤销最近一组处置")
     print("  fp <id>       标记事件为误报(写入学习)")
+    print("  pending        查看待人工确认的高危动作")
+    print("  approve <ID>|all   批准执行待确认动作(高危需确认时)")
+    print("  deny <ID>|all     拒绝执行待确认动作")
     print()
 
     while True:
@@ -947,8 +1244,14 @@ def main():
                 defense.cmd_undo()
             elif cmd == 'fp':
                 defense.cmd_fp(parts[1] if len(parts) > 1 else '')
+            elif cmd == 'pending':
+                defense.cmd_pending()
+            elif cmd == 'approve':
+                defense.cmd_approve(parts[1] if len(parts) > 1 else '')
+            elif cmd == 'deny':
+                defense.cmd_deny(parts[1] if len(parts) > 1 else '')
             elif cmd == 'help':
-                print("  on/off/status/alerts/actions/incidents/report/undo/fp/exit")
+                print("  on/off/status/alerts/actions/incidents/report/undo/fp/pending/approve/deny/exit")
             else:
                 print("  [!] 未知命令: %s (输入 help)" % cmd)
         except (KeyboardInterrupt, EOFError):

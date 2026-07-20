@@ -240,7 +240,7 @@ sudo bash scripts/setup-all.sh
 ╠══════════════════════════════════════════════════════╣
 ║  [靶机 - CentOS VM]                                   ║
 ║  Web 服务:     http://<本机IP>:8080                  ║
-║  防御智能体:   cd /opt/defense-agent &&              ║
+║  防御智能体:   cd defense-agent &&              ║
 ║                sudo bash start-defense.sh             ║
 ║  WebShell样本: /opt/webshell/                        ║
 ║                                                      ║
@@ -270,7 +270,7 @@ systemctl status httpd
 
 **验证防御智能体文件**：
 ```bash
-ls /opt/defense-agent/
+ls defense-agent/
 ```
 应显示 `defense_agent.py  defense_console.py  start-defense.sh`
 
@@ -668,7 +668,7 @@ sudo bash scripts/reset-env.sh
 通过 SSH 或 VMware 控制台连接到 CentOS，执行：
 
 ```bash
-cd /opt/defense-agent
+cd defense-agent
 sudo bash start-defense.sh
 ```
 
@@ -993,7 +993,7 @@ python3 /opt/webshell/beacon.py 192.168.163.1 8888
 
 ```bash
 # 防御智能体必须以 root 运行
-sudo bash /opt/defense-agent/start-defense.sh
+sudo bash defense-agent/start-defense.sh
 
 # 检查 iptables 命令是否可用
 which iptables
@@ -1049,7 +1049,7 @@ sudo bash /root/webshell-attack-defense-system/scripts/reset-env.sh
 | 靶机 Web 服务 | CentOS VM | `/var/www/vulnerable/` | 文件上传漏洞站点 |
 | WebShell 样本 | CentOS VM | `/opt/webshell/` | PHP WebShell + Python Beacon |
 | C2 远控服务 | **Windows 宿主机** | `c2-server\` | C2 服务器 + 操作控制台 |
-| 防御智能体 | CentOS VM | `/opt/defense-agent/` | 文件/网络/进程监控 |
+| 防御智能体 | CentOS VM | `defense-agent/` | 文件/网络/进程监控 |
 | 部署脚本 | CentOS VM | `/root/webshell-attack-defense-system/scripts/` | 靶机部署 + 环境重置 |
 | 隔离目录 | CentOS VM | `/tmp/quarantine/` | 被隔离的可疑文件 |
 | Apache 日志 | CentOS VM | `/var/log/httpd/` | Web 服务日志 |
@@ -1105,7 +1105,7 @@ LLM 大脑和 C2 一样跑在 Windows 宿主机，CentOS 研判 Agent 跨网调�
 
 ```bash
 # CentOS 上（需 root）
-cd /opt/defense-agent
+cd defense-agent
 sudo bash start-defense.sh
 ```
 

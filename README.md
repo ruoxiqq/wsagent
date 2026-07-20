@@ -113,7 +113,7 @@ start-c2.bat
 ### 第三步：在 CentOS 上启动防御智能体
 
 ```bash
-cd /opt/defense-agent
+cd defense-agent
 sudo bash start-defense.sh
 # 输入 on 开启防护，off 关闭防护
 ```
@@ -132,7 +132,7 @@ python c2_console.py
 
 ### 启动防御智能体（CentOS）
 ```bash
-cd /opt/defense-agent
+cd defense-agent
 sudo bash start-defense.sh
 # 输入 on 开启防护，off 关闭防护
 ```

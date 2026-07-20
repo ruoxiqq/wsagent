@@ -8,10 +8,26 @@
 """
 
 import os
+import ipaddress
 
 
 def _env(key, default):
     return os.environ.get(key, default)
+
+
+def ip_in_cidrs(ip, cidrs):
+    """判断 ip 是否落在任一 cidr 内(用于内网横向移动识别)。"""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for c in cidrs:
+        try:
+            if addr in ipaddress.ip_network(c, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 # ========== LLM 大脑配置 ==========
@@ -31,7 +47,7 @@ OLLAMA_MODEL = _env('OLLAMA_MODEL', 'qwen2.5:7b')
 # 以 Qwen 为例:    https://dashscope.aliyuncs.com/compatible-mode/v1 ; model: qwen-plus
 CLOUD_API_URL = _env('CLOUD_API_URL', 'https://api.siliconflow.cn/v1')
 CLOUD_API_KEY = _env('CLOUD_API_KEY', 'sk-lcjrjprepquqmqvgeltsikjywkqenyborrhaivxtbjmhpkaq')
-CLOUD_MODEL = _env('CLOUD_MODEL', 'Pro/zai-org/GLM-4.7')
+CLOUD_MODEL = _env('CLOUD_MODEL', 'deepseek-ai/DeepSeek-V3.2')
 
 # LLM 调用超时(秒)。本地小模型在 CPU 上较慢，建议 60s
 LLM_TIMEOUT = int(_env('DEFENSE_LLM_TIMEOUT', '60'))
@@ -52,6 +68,24 @@ KNOWN_BAD_PROCESSES = [
     'beacon.py',                # 独立 Beacon
 ]
 
+# ========== 内网横向移动检测配置 ==========
+# 需要监控"内网靶机网段"(被控主机向这些网段发起的扫描/连接视为横向移动嫌疑)。
+# 本实验室 CentOS 靶机为 192.168.62.128, 内网靶机网段为 192.168.62.0/24。
+INTERNAL_SUBNETS = [_s.strip() for _s in
+                    _env('DEFENSE_INTERNAL_SUBNETS', '192.168.62.0/24').split(',') if _s.strip()]
+
+# 敏感内网端口: 命中即强烈暗示横向移动(提权/凭证窃取/服务利用)
+SENSITIVE_PORTS = [int(_x) for _x in
+                   _env('DEFENSE_SENSITIVE_PORTS',
+                        '445,139,135,22,3389,5985,5986,1433,3306,5432,6379')
+                   .split(',') if _x.strip()]
+
+# 行为阈值: 同一进程在时间窗内连到多少个不同内网 IP / 不同端口, 判定为横向移动
+LATERAL_DISTINCT_IPS = int(_env('DEFENSE_LATERAL_IPS', '3'))
+LATERAL_DISTINCT_PORTS = int(_env('DEFENSE_LATERAL_PORTS', '5'))
+# 行为观察滑动窗口(秒): 窗口内聚合同一进程的内网连接
+NET_WINDOW = int(_env('DEFENSE_NET_WINDOW', '20'))
+
 # ========== 关联引擎配置 ==========
 # 滑动时间窗(秒)：窗内多源信号聚类成一个 incident
 CORRELATION_WINDOW = int(_env('DEFENSE_CORR_WINDOW', '30'))
@@ -63,6 +97,12 @@ TIER_ALERT = int(_env('DEFENSE_TIER_ALERT', '40'))      # <40 仅告警
 TIER_ISOLATE = int(_env('DEFENSE_TIER_ISOLATE', '60'))  # 40-69 隔离文件
 TIER_BLOCK = int(_env('DEFENSE_TIER_BLOCK', '80'))      # 70-84 +阻断网络
 # >=85 终止进程 + 删除文件
+
+# ========== 人工确认 (Human-in-the-Loop) ==========
+# 高危动作(kill/block/disable_account)是否需要人工确认后执行。
+# 教学演示默认 false(自动执行, 便于观察完整响应); 设为 true 开启人工确认,
+# 待审批动作在控制台用 approve <ID> / approve all 执行。
+HITL_DESTRUCTIVE = _env('DEFENSE_HITL', 'false').lower() in ('1', 'true', 'yes', 'y')
 
 # ========== 采样间隔(秒) ==========
 INTERVAL_FILE = float(_env('DEFENSE_IV_FILE', '1'))
